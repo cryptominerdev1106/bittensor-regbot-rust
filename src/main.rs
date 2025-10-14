@@ -17,14 +17,8 @@ use crate::register::*;
 #[command(about = "Quick registration tool for Bittensor network")]
 struct Cli {
     /// RPC endpoint URL
-    /// One or more RPC endpoints (repeat flag to add more)
-    #[arg(
-        short = 'r',
-        long = "rpc-url",
-        num_args = 1..,
-        value_delimiter = ',',
-        default_values_t = vec![String::from("wss://entrypoint-finney.opentensor.ai:443")]
-    )]
+    /// One or more RPC endpoints (repeat or comma-separated)
+    #[arg(short = 'r', long = "rpc-url", num_args = 1.., value_delimiter = ',', default_values_t = vec![String::from("wss://entrypoint-finney.opentensor.ai:443")])]
     rpc_url: Vec<String>,
 
     #[command(subcommand)]
@@ -43,56 +37,30 @@ enum Commands {
         hotkey: String,
         #[arg(long)]
         burn_amount: Option<u64>,
-        /// Wait for next block then submit (helps land at front of next block)
         #[arg(long, default_value_t = false)]
         submit_on_new_head: bool,
-        /// Delay after new head before first submit (ms)
         #[arg(long, default_value_t = 250)]
         head_delay_ms: u64,
-        /// Mortal era period in blocks (default 64)
         #[arg(long, default_value_t = 64)]
         era_period: u64,
-
-        /// Watch mempool for competing burned_register txs
+        #[arg(long)]
+        tip: Option<u128>,
+        #[arg(long, default_value_t = 3)]
+        rbf_rounds: u32,
+        #[arg(long, default_value_t = 1.5)]
+        bump: f64,
+        #[arg(long, default_value_t = 6)]
+        rbf_wait_secs: u64,
         #[arg(long, default_value_t = false)]
         watch_mempool: bool,
-        /// How long to watch before first submit (seconds)
         #[arg(long, default_value_t = 0)]
         watch_duration_secs: u64,
-        /// Poll interval while watching (ms)
         #[arg(long, default_value_t = 500)]
         watch_interval_ms: u64,
-        /// If true, bump the first tip immediately when competition is detected
-        #[arg(long, default_value_t = false)]
-        watch_reactive: bool,
-        /// Multiplicative bump to apply when competition detected (e.g., 1.25)
         #[arg(long, default_value_t = 1.25)]
         watch_bump_now: f64,
-
-        /// Optional tip in RAO (planck) to prioritize inclusion
-        #[arg(long)]
-        tip: Option<u128>,
-        /// RBF rounds (same nonce, higher tip)
-        #[arg(long, default_value_t = 3)]
-        rbf_rounds: u32,
-        /// Tip bump factor (e.g., 1.5)
-        #[arg(long, default_value_t = 1.5)]
-        bump: f64,
-        /// Seconds to wait between RBF resubmissions
-        #[arg(long, default_value_t = 6)]
-        rbf_wait_secs: u64,
-        /// Optional tip in RAO (planck) to prioritize inclusion
-        #[arg(long)]
-        tip: Option<u128>,
-        /// RBF rounds (same nonce, higher tip)
-        #[arg(long, default_value_t = 3)]
-        rbf_rounds: u32,
-        /// Tip bump factor (e.g., 1.5)
-        #[arg(long, default_value_t = 1.5)]
-        bump: f64,
-        /// Seconds to wait between RBF resubmissions
-        #[arg(long, default_value_t = 6)]
-        rbf_wait_secs: u64,
+        #[arg(long, default_value_t = false)]
+        watch_reactive: bool,
     },
 
     /// Check registration status of a hotkey
@@ -131,8 +99,32 @@ enum Commands {
         wallet: String,
         #[arg(short = 'H', long)]
         hotkey: String,
-        #[arg(long, default_value = "3")]
-        max_retries: usize,
+        #[arg(long)]
+        burn_amount: Option<u64>,
+        #[arg(long, default_value_t = false)]
+        submit_on_new_head: bool,
+        #[arg(long, default_value_t = 250)]
+        head_delay_ms: u64,
+        #[arg(long, default_value_t = 64)]
+        era_period: u64,
+        #[arg(long)]
+        tip: Option<u128>,
+        #[arg(long, default_value_t = 3)]
+        rbf_rounds: u32,
+        #[arg(long, default_value_t = 1.5)]
+        bump: f64,
+        #[arg(long, default_value_t = 6)]
+        rbf_wait_secs: u64,
+        #[arg(long, default_value_t = false)]
+        watch_mempool: bool,
+        #[arg(long, default_value_t = 0)]
+        watch_duration_secs: u64,
+        #[arg(long, default_value_t = 500)]
+        watch_interval_ms: u64,
+        #[arg(long, default_value_t = 1.25)]
+        watch_bump_now: f64,
+        #[arg(long, default_value_t = false)]
+        watch_reactive: bool,
     },
 
     /// Show network statistics
@@ -183,10 +175,32 @@ async fn main() -> Result<()> {
             rbf_rounds,
             bump,
             rbf_wait_secs,
+            watch_mempool,
+            watch_duration_secs,
+            watch_interval_ms,
+            watch_reactive,
+            watch_bump_now,
         } => {
             let register_client: QuickRegister = QuickRegister::new(cli.rpc_url.clone()).await?;
             register_client
-                .register_to_subnet(subnet, &wallet, &hotkey, burn_amount, submit_on_new_head, head_delay_ms, era_period, tip, rbf_rounds, bump, rbf_wait_secs)
+                .register_to_subnet(
+                    subnet,
+                    &wallet,
+                    &hotkey,
+                    burn_amount,
+                    submit_on_new_head,
+                    head_delay_ms,
+                    era_period,
+                    tip,
+                    rbf_rounds,
+                    bump,
+                    rbf_wait_secs,
+                    watch_mempool,
+                    watch_duration_secs,
+                    watch_interval_ms,
+                    watch_reactive,
+                    watch_bump_now,
+                )
                 .await?;
         }
 
@@ -231,11 +245,39 @@ async fn main() -> Result<()> {
         }
 
         Commands::AutoRegister {
-            subnet,
-            wallet,
-            hotkey,
-            max_retries,
-        } => {
+        #[arg(short, long)]
+        subnet: u16,
+        #[arg(short, long)]
+        wallet: String,
+        #[arg(short = 'H', long)]
+        hotkey: String,
+        #[arg(long)]
+        burn_amount: Option<u64>,
+        #[arg(long, default_value_t = false)]
+        submit_on_new_head: bool,
+        #[arg(long, default_value_t = 250)]
+        head_delay_ms: u64,
+        #[arg(long, default_value_t = 64)]
+        era_period: u64,
+        #[arg(long)]
+        tip: Option<u128>,
+        #[arg(long, default_value_t = 3)]
+        rbf_rounds: u32,
+        #[arg(long, default_value_t = 1.5)]
+        bump: f64,
+        #[arg(long, default_value_t = 6)]
+        rbf_wait_secs: u64,
+        #[arg(long, default_value_t = false)]
+        watch_mempool: bool,
+        #[arg(long, default_value_t = 0)]
+        watch_duration_secs: u64,
+        #[arg(long, default_value_t = 500)]
+        watch_interval_ms: u64,
+        #[arg(long, default_value_t = 1.25)]
+        watch_bump_now: f64,
+        #[arg(long, default_value_t = false)]
+        watch_reactive: bool,
+    } => {
             let register_client = QuickRegister::new(cli.rpc_url).await?;
             register_client
                 .auto_register_with_retry(subnet, &wallet, &hotkey, max_retries)

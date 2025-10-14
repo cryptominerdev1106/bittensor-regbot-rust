@@ -646,18 +646,10 @@ impl BittensorClient {
     }
 
     fn create_signed_extra(&self, nonce: u64, block_number: u64) -> Result<Vec<u8>> {
-        self.create_signed_extra_with_tip(nonce, block_number, 0u128, 64)
-    }
-
-    fn create_signed_extra_with_tip(&self, nonce: u64, block_number: u64, tip: u128, era_period: u64) -> Result<Vec<u8>> {
-        self.create_signed_extra_with_tip(nonce, block_number, 0u128)
-    }
-
-    fn create_signed_extra_with_tip(&self, nonce: u64, block_number: u64, tip: u128) -> Result<Vec<u8>> {
         let mut extra = Vec::new();
 
         // Era (mortal)
-        let era_period = era_period.max(4);
+        let era_period = 64u64;
         let phase = block_number % era_period;
         let era = ((era_period.trailing_zeros() - 1).max(1) as u8)
             | ((phase / (era_period >> 4)) as u8) << 6;
@@ -668,51 +660,10 @@ impl BittensorClient {
         nonce.encode_to(&mut extra);
 
         // Tip
-        let tip_u128: u128 = tip;
-        tip_u128.encode_to(&mut extra); // Custom tip (in RAO)
+        0u64.encode_to(&mut extra); // No tip
 
         Ok(extra)
     }
-    async fn create_signed_extrinsic_with(
-        &self,
-        call: Vec<u8>,
-        signer: &Sr25519Pair,
-        fixed_nonce: u64,
-        tip: u128,
-    ) -> Result<Vec<u8>> {
-        let account_id = AccountId32::from(signer.public().0);
-        let current_block = self.get_current_block().await?;
-        let _genesis_hash = self.get_genesis_hash().await?;
-        let _block_hash = self.get_block_hash(None).await?;
-
-        let extra = self.create_signed_extra_with_tip(fixed_nonce, current_block, tip)?;
-
-        let mut payload = Vec::new();
-        call.encode_to(&mut payload);
-        extra.encode_to(&mut payload);
-
-        let signing_payload = if payload.len() > 256 {
-            sp_core::blake2_256(&payload).to_vec()
-        } else {
-            payload
-        };
-
-        let signature = signer.sign(&signing_payload);
-
-        let mut extrinsic = Vec::new();
-        extrinsic.push(0x84);
-        AccountId32::from(signer.public().0).encode_to(&mut extrinsic);
-        signature.encode_to(&mut extrinsic);
-        extra.encode_to(&mut extrinsic);
-        call.encode_to(&mut extrinsic);
-
-        let mut final_extrinsic = Vec::new();
-        ((extrinsic.len() as u32) | 0x8000_0000).encode_to(&mut final_extrinsic);
-        final_extrinsic.extend(extrinsic);
-
-        Ok(final_extrinsic)
-    }
-
 
     async fn get_genesis_hash(&self) -> Result<H256> {
         let result: String = self
@@ -737,19 +688,6 @@ impl BittensorClient {
             .await
             .context("Failed to get block hash")?;
 
-        Ok(H256::from_str(&result[2..])?)
-    }
-
-    
-    async fn submit_extrinsic_to_endpoint(endpoint: &str, extrinsic_hex: &str) -> Result<H256> {
-        let ws = WsClientBuilder::default()
-            .build(endpoint)
-            .await
-            .with_context(|| format!("Failed to connect to {}", endpoint))?;
-        let result: String = ws
-            .request("author_submitExtrinsic", rpc_params![format!("0x{}", extrinsic_hex)])
-            .await
-            .with_context(|| format!("Failed to submit extrinsic to {}", endpoint))?;
         Ok(H256::from_str(&result[2..])?)
     }
 
@@ -1046,12 +984,6 @@ impl BittensorClient {
         &self,
         registration_data: &RegistrationData,
         signer: &Sr25519Pair,
-        era_period: u64,
-        extra_endpoints: &[String],
-        era_period: u64,
-        // Reactive mempool bump toggles
-        watch_reactive: bool,
-        watch_bump_now: f64,
     ) -> Result<H256> {
         println!("🔥 Submitting burned registration transaction...");
 
@@ -1062,7 +994,7 @@ impl BittensorClient {
             registration_data.burn_amount,
         )?;
 
-        let extrinsic = self.create_signed_extrinsic(call, signer, era_period).await?;
+        let extrinsic = self.create_signed_extrinsic(call, signer).await?;
         self.submit_extrinsic(hex::encode(extrinsic)).await
     }
 
@@ -1088,204 +1020,6 @@ impl BittensorClient {
 
         Ok(call)
     }
-
-    /// Submit burned registration with RBF-style same-nonce & increasing tip, broadcasting to extra endpoints.
-    pub async fn submit_burned_registration_rbf(
-        &self,
-        registration_data: &RegistrationData,
-        signer: &Sr25519Pair,
-        base_tip: u128,
-        rounds: u32,
-        bump: f64,
-        wait_secs: u64,
-        extra_endpoints: &[String],
-        era_period: u64,
-        extra_endpoints: &[String],
-        era_period: u64,
-        // Reactive mempool bump toggles
-        watch_reactive: bool,
-        watch_bump_now: f64,
-    ) -> Result<H256> {
-        println!("🔥 Submitting burned registration with RBF (rounds: {}, bump: {:.2})", rounds, bump);
-        let call = self.encode_burned_register_call(
-            registration_data.subnet_id,
-            registration_data.hotkey.clone(),
-            registration_data.burn_amount,
-        )?;
-
-        let account_id = AccountId32::from(signer.public().0);
-        let account_info = self.get_account_info(&account_id).await?;
-        let nonce = account_info.nonce as u64;
-
-        let mut tip = base_tip.max(1_000_000u128);
-        let mut last_hash: Option<H256> = None;
-
-        for round in 1..=rounds {
-            println!("   ▶ Round {}/{} with tip: {} RAO", round, rounds, tip);
-            // Optional: if reactive mode, peek at mempool briefly and bump tip pre-submit
-            if watch_reactive {
-                if let Ok(cnt) = self.watch_competing_burns(registration_data.subnet_id, &registration_data.hotkey, extra_endpoints, 0, 0).await {
-                    if cnt > 0 {
-                        let bumped = ((tip as f64) * watch_bump_now).ceil() as u128;
-                        if bumped > tip { println!("   ⚡ Reactive bump from {} to {} due to mempool competition", tip, bumped); tip = bumped; }
-                    }
-                }
-            }
-            let extrinsic = self.create_signed_extrinsic_with(call.clone(), signer, nonce, tip, era_period).await?;
-            let hexed = hex::encode(extrinsic);
-            let primary = self.submit_extrinsic(hexed.clone()).await?;
-            println!("   ⛓️  Submitted to primary: {}", primary);
-
-            if !extra_endpoints.is_empty() {
-                println!("   🌐 Broadcasting to {} extra RPC(s)...", extra_endpoints.len());
-                let mut tasks = Vec::new();
-                for ep in extra_endpoints.iter() {
-                    let epc = ep.clone();
-                    let hexc = hexed.clone();
-                    tasks.push(tokio::spawn(async move {
-                        let r = Self::submit_extrinsic_to_endpoint(&epc, &hexc).await;
-                        (epc, r)
-                    }));
-                }
-                for t in tasks {
-                    match t.await {
-                        Ok((ep, Ok(h))) => println!("     • {} -> {}", ep, h),
-                        Ok((ep, Err(e))) => println!("     • {} -> error: {}", ep, e),
-                        Err(e) => println!("     • task join error: {}", e),
-                    }
-                }
-            }
-
-            last_hash = Some(primary);
-            tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
-
-            if let Ok(Some(_neuron)) = self.check_registration(registration_data.subnet_id, &registration_data.hotkey).await {
-                println!("✅ Detected registration on-chain. Stopping RBF loop.");
-                return Ok(primary);
-            }
-
-            tip = ((tip as f64) * bump).ceil() as u128;
-        }
-
-        println!("⚠️ RBF rounds exhausted. Returning last tx hash.");
-        last_hash.ok_or_else(|| anyhow::anyhow!("Failed to submit transaction"))
-    }
-
-    /// Waits until the next block is produced, then waits an additional delay (ms).
-    pub async fn wait_for_next_head(&self, delay_ms: u64) -> Result<()> {
-        let start = self.get_current_block().await?;
-        loop {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let now = self.get_current_block().await?;
-            if now > start {
-                if delay_ms > 0 { tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await; }
-                return Ok(());
-            }
-        }
-    }
-
-    /// Checks if a given extrinsic hash appears in recent blocks [head - depth, head].
-    pub async fn is_tx_in_recent_blocks(&self, tx_hash: H256, depth: u32) -> Result<bool> {
-        let head_block = self.get_current_block().await?;
-        let depth = depth.min(64).max(1);
-        for i in 0..=depth {
-            let h = head_block.saturating_sub(i as u64);
-            let block_hash = self.get_block_hash(Some(h)).await?;
-            // get block
-            let block: serde_json::Value = self.client.request("chain_getBlock", rpc_params![block_hash]).await?;
-            if let Some(extrs) = block.pointer("/block/extrinsics").and_then(|v| v.as_array()) {
-                for ex in extrs {
-                    if let Some(hexstr) = ex.as_str() {
-                        if let Ok(bytes) = hex::decode(&hexstr.trim_start_matches("0x")) {
-                            let hash = H256::from(sp_core::blake2_256(&bytes));
-                            if hash == tx_hash { return Ok(true); }
-                        }
-                    }
-                }
-            }
-        }
-        Ok(False)
-    }
-
-    /// Fetch pending extrinsics (hex-encoded) from a specific endpoint.
-    async fn fetch_pending_from_endpoint(endpoint: &str) -> Result<Vec<String>> {
-        let ws = WsClientBuilder::default()
-            .build(endpoint)
-            .await
-            .with_context(|| format!("Failed to connect to {}", endpoint))?;
-        let pending: Vec<String> = ws
-            .request("author_pendingExtrinsics", rpc_params![])
-            .await
-            .with_context(|| format!("Failed to fetch pending extrinsics from {}", endpoint))?;
-        Ok(pending)
-    }
-
-    /// Returns count of pending burned_register extrinsics for the given netuid/hotkey across endpoints.
-    pub async fn watch_competing_burns(
-        &self,
-        netuid: u16,
-        hotkey: &AccountId32,
-        extra_endpoints: &[String],
-        duration_secs: u64,
-        interval_ms: u64,
-    ) -> Result<usize> {
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut total = 0usize;
-        let endpoints: Vec<String> = {
-            let mut v = vec![self.endpoint.clone()];
-            v.extend_from_slice(extra_endpoints);
-            v
-        };
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(duration_secs);
-        while std::time::Instant::now() < deadline {
-            // fetch all endpoints in parallel
-            let mut tasks = Vec::new();
-            for ep in endpoints.iter() {
-                let epc = ep.clone();
-                tasks.push(tokio::spawn(async move {
-                    Self::fetch_pending_from_endpoint(&epc).await.map(|v| (epc, v))
-                }));
-            }
-            for t in tasks {
-                if let Ok(Ok((_ep, hexes))) = t.await {
-                    for hx in hexes {
-                        if seen.insert(hx.clone()) {
-                            if Self::looks_like_competing_burn(&hx, netuid, hotkey) {
-                                total += 1;
-                            }
-                        }
-                    }
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
-        }
-        Ok(total)
-    }
-
-    /// Heuristic: scan the hex for method bytes [08 01] (pallet 8, call 1), followed by LE netuid and the hotkey bytes.
-    fn looks_like_competing_burn(hex_ex: &str, netuid: u16, hotkey: &AccountId32) -> bool {
-        if let Ok(bytes) = hex::decode(hex_ex.trim_start_matches("0x")) {
-            let needle = [8u8, 1u8]; // SubtensorModule(8)::burned_register(1)
-            // find method prefix somewhere in the bytes
-            for i in 0..bytes.len().saturating_sub(2) {
-                if bytes[i..].starts_with(&needle) {
-                    let mut off = i + 2;
-                    if off + 2 + 32 <= bytes.len() {
-                        // netuid LE
-                        let nu = u16::from_le_bytes([bytes[off], bytes[off+1]]);
-                        off += 2;
-                        // hotkey 32
-                        let hk = &bytes[off..off+32];
-                        if nu == netuid && hk == hotkey.as_ref() {
-                            return True;
-                        }
-                    }
-                }
-            }
-        }
-        False
-    }
 }
 
 #[cfg(test)]
@@ -1307,3 +1041,70 @@ mod tests {
         assert!(json.is_ok());
     }
 }
+
+    async fn submit_extrinsic_to_endpoint(endpoint: &str, extrinsic_hex: &str) -> Result<H256> { let ws = WsClientBuilder::default().build(endpoint).await.with_context(|| format!("Failed to connect to {}", endpoint))?; let result: String = ws.request("author_submitExtrinsic", rpc_params![format!("0x{}", extrinsic_hex)]).await.with_context(|| format!("Failed to submit extrinsic to {}", endpoint))?; Ok(H256::from_str(&result[2..])?) }
+
+    pub async fn submit_burned_registration_rbf(
+        &self,
+        registration_data: &RegistrationData,
+        signer: &Sr25519Pair,
+        base_tip: u128,
+        rounds: u32,
+        bump: f64,
+        wait_secs: u64,
+        extra_endpoints: &[String],
+        era_period: u64,
+        watch_reactive: bool,
+        watch_bump_now: f64,
+    ) -> Result<H256> {
+        println!("🔥 Submitting burned registration with RBF (rounds: {}, bump: {:.2})", rounds, bump);
+        let call = self.encode_burned_register_call(
+            registration_data.subnet_id,
+            registration_data.hotkey.clone(),
+            registration_data.burn_amount,
+        )?;
+        let account_id = AccountId32::from(signer.public().0);
+        let account_info = self.get_account_info(&account_id).await?;
+        let nonce = account_info.nonce as u64;
+        let mut tip = base_tip.max(1_000_000u128);
+        let mut last_hash: Option<H256> = None;
+        for round in 1..=rounds {
+            println!("   ▶ Round {}/{} with tip: {} RAO", round, rounds, tip);
+            if watch_reactive {
+                if let Ok(cnt) = self.watch_competing_burns(registration_data.subnet_id, &registration_data.hotkey, extra_endpoints, 0, 0).await {
+                    if cnt > 0 {
+                        let bumped = ((tip as f64) * watch_bump_now).ceil() as u128;
+                        if bumped > tip { println!("   ⚡ Reactive bump from {} → {} due to mempool competition", tip, bumped); tip = bumped; }
+                    }
+                }
+            }
+            let extrinsic = self.create_signed_extrinsic_with(call.clone(), signer, nonce, tip, era_period).await?;
+            let hexed = hex::encode(extrinsic);
+            let primary = self.submit_extrinsic(hexed.clone()).await?;
+            println!("   ⛓️  Submitted to primary: {}", primary);
+            if !extra_endpoints.is_empty() {
+                println!("   🌐 Broadcasting to {} extra RPC(s)...", extra_endpoints.len());
+                let mut tasks = Vec::new();
+                for ep in extra_endpoints.iter() {
+                    let epc = ep.clone(); let hexc = hexed.clone();
+                    tasks.push(tokio::spawn(async move { let r = Self::submit_extrinsic_to_endpoint(&epc, &hexc).await; (epc, r) }));
+                }
+                for t in tasks {
+                    match t.await {
+                        Ok((ep, Ok(h))) => println!("     • {} -> {}", ep, h),
+                        Ok((ep, Err(e))) => println!("     • {} -> error: {}", ep, e),
+                        Err(e) => println!("     • task join error: {}", e),
+                    }
+                }
+            }
+            last_hash = Some(primary);
+            tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
+            if let Ok(Some(_neuron)) = self.check_registration(registration_data.subnet_id, &registration_data.hotkey).await {
+                println!("✅ Detected registration on-chain. Stopping RBF loop.");
+                return Ok(primary);
+            }
+        }
+        println!("⚠️ RBF rounds exhausted. Returning last tx hash.");
+        last_hash.ok_or_else(|| anyhow!("Failed to submit transaction"))
+    }
+    

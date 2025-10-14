@@ -109,25 +109,6 @@ impl QuickRegister {
             )
             .await?;
 
-
-        // 6.5 Optional: mempool watch before submitting
-        if watch_mempool && watch_duration_secs > 0 {
-            println!("🛰️  Watching mempool for competing burned_register extrinsics for {}s ({} ms interval)...",
-                watch_duration_secs, watch_interval_ms);
-            let competitors = self.client.watch_competing_burns(
-                netuid,
-                &hotkey_account,
-                &self.extra_rpcs,
-                watch_duration_secs,
-                watch_interval_ms
-            ).await?;
-            if competitors > 0 {
-                println!("⚔️  Detected {} competing tx(s) for subnet {}.", competitors, netuid);
-            } else {
-                println!("✅ No competitors seen during watch window.");
-            }
-        }
-
         // 7. (optional) Wait for block boundary
         if submit_on_new_head {
             println!("⏱️  Waiting for next block boundary ({} ms delay)...", head_delay_ms);
@@ -137,18 +118,7 @@ impl QuickRegister {
         // 7. Sending registration
         let tx_hash = self
             .client
-            .submit_burned_registration_rbf(
-                &registration_data,
-                &coldkey_pair,
-                tip.unwrap_or(10_000_000u128),
-                rbf_rounds,
-                bump,
-                rbf_wait_secs,
-                &self.extra_rpcs,
-                era_period,
-                watch_reactive,
-                watch_bump_now,
-            )
+            .submit_burned_registration(&registration_data, &coldkey_pair)
             .await?;
 
         println!("\n🎉 Registration completed successfully!");
@@ -401,7 +371,7 @@ impl QuickRegister {
             println!("\n🚀 Registration attempt {}/{}", attempt, max_retries);
 
             match self
-                .register_to_subnet(netuid, wallet_path, hotkey_path, None)
+                .register_to_subnet(netuid, wallet_path, hotkey_path, None, false, 250, 64, None, 3, 1.5, 6, false, 0, 500, false, 1.25)
                 .await
             {
                 Ok(_) => {
@@ -526,7 +496,7 @@ impl QuickRegister {
                 "register" => {
                     if let Some(wallet) = &operation.wallet {
                         match self
-                            .register_to_subnet(operation.subnet, wallet, &operation.hotkey, None)
+                            .register_to_subnet(operation.subnet, wallet, &operation.hotkey, None, false, 250, 64, None, 3, 1.5, 6, false, 0, 500, false, 1.25)
                             .await
                         {
                             Ok(_) => println!("✅ Registration completed"),
