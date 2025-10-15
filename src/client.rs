@@ -145,18 +145,12 @@ pub struct BittensorClient {
 }
 
 impl BittensorClient {
+    async fn submit_extrinsic_to_endpoint(endpoint: &str, extrinsic_hex: &str) -> Result<H256> { let ws = WsClientBuilder::default().build(endpoint).await.with_context(|| format!("Failed to connect to {}", endpoint))?; let result: String = ws.request("author_submitExtrinsic", rpc_params![format!("0x{}", extrinsic_hex)]).await.with_context(|| format!("Failed to submit extrinsic to {}", endpoint))?; Ok(H256::from_str(&result[2..])?) }
     pub async fn new(endpoint: String) -> Result<Self> {
-        println!("🔗 Connecting to Bittensor network: {}", endpoint);
-
         let client = WsClientBuilder::default()
-            .connection_timeout(Duration::from_secs(30))
-            .request_timeout(Duration::from_secs(60))
             .build(&endpoint)
             .await
-            .context("Failed to connect to Bittensor RPC endpoint")?;
-
-        println!("✅ Connected to Bittensor network");
-
+            .context("Failed to connect to WS endpoint")?;
         Ok(Self { client, endpoint })
     }
 
@@ -1042,69 +1036,12 @@ mod tests {
     }
 }
 
-    async fn submit_extrinsic_to_endpoint(endpoint: &str, extrinsic_hex: &str) -> Result<H256> { let ws = WsClientBuilder::default().build(endpoint).await.with_context(|| format!("Failed to connect to {}", endpoint))?; let result: String = ws.request("author_submitExtrinsic", rpc_params![format!("0x{}", extrinsic_hex)]).await.with_context(|| format!("Failed to submit extrinsic to {}", endpoint))?; Ok(H256::from_str(&result[2..])?) }
+impl BittensorClient { pub async fn wait_for_next_head(&self, delay_ms: u64) -> Result<()> { let start = self.get_current_block().await?; loop { tokio::time::sleep(std::time::Duration::from_millis(100)).await; let now = self.get_current_block().await?; if now > start { if delay_ms > 0 { tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await; } return Ok(()); } } } }
 
-    pub async fn submit_burned_registration_rbf(
-        &self,
-        registration_data: &RegistrationData,
-        signer: &Sr25519Pair,
-        base_tip: u128,
-        rounds: u32,
-        bump: f64,
-        wait_secs: u64,
-        extra_endpoints: &[String],
-        era_period: u64,
-        watch_reactive: bool,
-        watch_bump_now: f64,
-    ) -> Result<H256> {
-        println!("🔥 Submitting burned registration with RBF (rounds: {}, bump: {:.2})", rounds, bump);
-        let call = self.encode_burned_register_call(
-            registration_data.subnet_id,
-            registration_data.hotkey.clone(),
-            registration_data.burn_amount,
-        )?;
-        let account_id = AccountId32::from(signer.public().0);
-        let account_info = self.get_account_info(&account_id).await?;
-        let nonce = account_info.nonce as u64;
-        let mut tip = base_tip.max(1_000_000u128);
-        let mut last_hash: Option<H256> = None;
-        for round in 1..=rounds {
-            println!("   ▶ Round {}/{} with tip: {} RAO", round, rounds, tip);
-            if watch_reactive {
-                if let Ok(cnt) = self.watch_competing_burns(registration_data.subnet_id, &registration_data.hotkey, extra_endpoints, 0, 0).await {
-                    if cnt > 0 {
-                        let bumped = ((tip as f64) * watch_bump_now).ceil() as u128;
-                        if bumped > tip { println!("   ⚡ Reactive bump from {} → {} due to mempool competition", tip, bumped); tip = bumped; }
-                    }
-                }
-            }
-            let extrinsic = self.create_signed_extrinsic_with(call.clone(), signer, nonce, tip, era_period).await?;
-            let hexed = hex::encode(extrinsic);
-            let primary = self.submit_extrinsic(hexed.clone()).await?;
-            println!("   ⛓️  Submitted to primary: {}", primary);
-            if !extra_endpoints.is_empty() {
-                println!("   🌐 Broadcasting to {} extra RPC(s)...", extra_endpoints.len());
-                let mut tasks = Vec::new();
-                for ep in extra_endpoints.iter() {
-                    let epc = ep.clone(); let hexc = hexed.clone();
-                    tasks.push(tokio::spawn(async move { let r = Self::submit_extrinsic_to_endpoint(&epc, &hexc).await; (epc, r) }));
-                }
-                for t in tasks {
-                    match t.await {
-                        Ok((ep, Ok(h))) => println!("     • {} -> {}", ep, h),
-                        Ok((ep, Err(e))) => println!("     • {} -> error: {}", ep, e),
-                        Err(e) => println!("     • task join error: {}", e),
-                    }
-                }
-            }
-            last_hash = Some(primary);
-            tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
-            if let Ok(Some(_neuron)) = self.check_registration(registration_data.subnet_id, &registration_data.hotkey).await {
-                println!("✅ Detected registration on-chain. Stopping RBF loop.");
-                return Ok(primary);
-            }
-        }
-        println!("⚠️ RBF rounds exhausted. Returning last tx hash.");
-        last_hash.ok_or_else(|| anyhow!("Failed to submit transaction"))
-    }
-    
+impl BittensorClient { pub async fn is_tx_in_recent_blocks(&self, tx_hash: H256, depth: u32) -> Result<bool> { let head_block = self.get_current_block().await?; let depth = depth.min(64).max(1); for i in 0..=depth { let h = head_block.saturating_sub(i as u64); let block_hash = self.get_block_hash(Some(h)).await?; let block: serde_json::Value = self.client.request("chain_getBlock", rpc_params![block_hash]).await?; if let Some(extrs) = block.pointer("/block/extrinsics").and_then(|v| v.as_array()) { for ex in extrs { if let Some(hexstr) = ex.as_str() { if let Ok(bytes) = hex::decode(&hexstr.trim_start_matches("0x")) { let hash = H256::from(sp_core::blake2_256(&bytes)); if hash == tx_hash { return Ok(true); } } } } } Ok(false) } }
+
+impl BittensorClient { async fn fetch_pending_from_endpoint(endpoint: &str) -> Result<Vec<String>> { let ws = WsClientBuilder::default().build(endpoint).await.with_context(|| format!("Failed to connect to {}", endpoint))?; let pending: Vec<String> = ws.request("author_pendingExtrinsics", rpc_params![]).await.with_context(|| format!("Failed to fetch pending extrinsics from {}", endpoint))?; Ok(pending) } }
+
+impl BittensorClient { pub async fn watch_competing_burns(&self, netuid: u16, hotkey: &AccountId32, extra_endpoints: &[String], duration_secs: u64, interval_ms: u64) -> Result<usize> { let mut seen = std::collections::HashSet::new(); let mut total = 0usize; let mut endpoints: Vec<String> = vec![self.endpoint.clone()]; endpoints.extend_from_slice(extra_endpoints); let deadline = std::time::Instant::now() + std::time::Duration::from_secs(duration_secs); while std::time::Instant::now() < deadline { let mut tasks = Vec::new(); for ep in endpoints.iter() { let epc = ep.clone(); tasks.push(tokio::spawn(async move { BittensorClient::fetch_pending_from_endpoint(&epc).await.map(|v| (epc, v)) })); } for t in tasks { if let Ok(Ok((_ep, hexes))) = t.await { for hx in hexes { if seen.insert(hx.clone()) { if BittensorClient::looks_like_competing_burn(&hx, netuid, hotkey) { total += 1; } } } } } tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await; } Ok(total) } }
+
+impl BittensorClient { fn looks_like_competing_burn(hex_ex: &str, netuid: u16, hotkey: &AccountId32) -> bool { if let Ok(bytes) = hex::decode(hex_ex.trim_start_matches("0x")) { let needle = [8u8, 1u8]; for i in 0..bytes.len().saturating_sub(2) { if bytes[i..].starts_with(&needle) { let mut off = i + 2; if off + 2 + 32 <= bytes.len() { let nu = u16::from_le_bytes([bytes[off], bytes[off+1]]); off += 2; let hk = &bytes[off:off+32]; if nu == netuid && hk == hotkey.as_ref() { return true; } } } } } return false } }

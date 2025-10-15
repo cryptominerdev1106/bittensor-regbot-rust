@@ -371,7 +371,7 @@ impl QuickRegister {
             println!("\n🚀 Registration attempt {}/{}", attempt, max_retries);
 
             match self
-                .register_to_subnet(netuid, wallet_path, hotkey_path, None, false, 250, 64, None, 3, 1.5, 6, false, 0, 500, false, 1.25)
+                .register_to_subnet(netuid, wallet_path, hotkey_path, None)
                 .await
             {
                 Ok(_) => {
@@ -496,7 +496,7 @@ impl QuickRegister {
                 "register" => {
                     if let Some(wallet) = &operation.wallet {
                         match self
-                            .register_to_subnet(operation.subnet, wallet, &operation.hotkey, None, false, 250, 64, None, 3, 1.5, 6, false, 0, 500, false, 1.25)
+                            .register_to_subnet(operation.subnet, wallet, &operation.hotkey, None)
                             .await
                         {
                             Ok(_) => println!("✅ Registration completed"),

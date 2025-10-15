@@ -205,22 +205,22 @@ async fn main() -> Result<()> {
         }
 
         Commands::Status { subnet, hotkey } => {
-            let register_client = QuickRegister::new(cli.rpc_url).await?;
+            let register_client = QuickRegister::new(cli.rpc_url.clone()).await?;
             register_client.check_status(subnet, &hotkey).await?;
         }
 
         Commands::SubnetInfo { subnet } => {
-            let register_client = QuickRegister::new(cli.rpc_url).await?;
+            let register_client = QuickRegister::new(cli.rpc_url.clone()).await?;
             register_client.show_subnet_info(subnet).await?;
         }
 
         Commands::EstimateCost { subnet } => {
-            let register_client = QuickRegister::new(cli.rpc_url).await?;
+            let register_client = QuickRegister::new(cli.rpc_url.clone()).await?;
             register_client.estimate_registration_cost(subnet).await?;
         }
 
         Commands::Monitor { neurons, interval } => {
-            let register_client = QuickRegister::new(cli.rpc_url).await?;
+            let register_client = QuickRegister::new(cli.rpc_url.clone()).await?;
             let parsed_neurons: Result<Vec<(u16, String)>> = neurons
                 .iter()
                 .map(|s| {
@@ -244,63 +244,30 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::AutoRegister {
-        #[arg(short, long)]
-        subnet: u16,
-        #[arg(short, long)]
-        wallet: String,
-        #[arg(short = 'H', long)]
-        hotkey: String,
-        #[arg(long)]
-        burn_amount: Option<u64>,
-        #[arg(long, default_value_t = false)]
-        submit_on_new_head: bool,
-        #[arg(long, default_value_t = 250)]
-        head_delay_ms: u64,
-        #[arg(long, default_value_t = 64)]
-        era_period: u64,
-        #[arg(long)]
-        tip: Option<u128>,
-        #[arg(long, default_value_t = 3)]
-        rbf_rounds: u32,
-        #[arg(long, default_value_t = 1.5)]
-        bump: f64,
-        #[arg(long, default_value_t = 6)]
-        rbf_wait_secs: u64,
-        #[arg(long, default_value_t = false)]
-        watch_mempool: bool,
-        #[arg(long, default_value_t = 0)]
-        watch_duration_secs: u64,
-        #[arg(long, default_value_t = 500)]
-        watch_interval_ms: u64,
-        #[arg(long, default_value_t = 1.25)]
-        watch_bump_now: f64,
-        #[arg(long, default_value_t = false)]
-        watch_reactive: bool,
-    } => {
-            let register_client = QuickRegister::new(cli.rpc_url).await?;
+        Commands::AutoRegister { subnet, wallet, hotkey, max_retries, burn_amount } => {
+            let register_client = QuickRegister::new(cli.rpc_url.clone()).await?;
             register_client
                 .auto_register_with_retry(subnet, &wallet, &hotkey, max_retries)
                 .await?;
         }
 
         Commands::NetworkStats => {
-            let register_client = QuickRegister::new(cli.rpc_url).await?;
+            let register_client = QuickRegister::new(cli.rpc_url.clone()).await?;
             register_client.show_network_statistics().await?;
         }
 
         Commands::ExportConfig { subnet, output } => {
-            let register_client = QuickRegister::new(cli.rpc_url).await?;
+            let register_client = QuickRegister::new(cli.rpc_url.clone()).await?;
             register_client.export_config(subnet, &output).await?;
         }
 
         Commands::Batch { config } => {
-            let register_client = QuickRegister::new(cli.rpc_url).await?;
+            let register_client = QuickRegister::new(cli.rpc_url.clone()).await?;
             register_client.execute_batch_operations(&config).await?;
         }
 
         Commands::Balance { account } => {
-            let register_client = QuickRegister::new(cli.rpc_url).await?;
+            let register_client = QuickRegister::new(cli.rpc_url.clone()).await?;
             register_client.check_account_balance(&account).await?;
         }
     }
